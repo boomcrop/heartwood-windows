@@ -1,0 +1,10 @@
+.DS_Store
+# built and downloaded: tools/sync_web.sh makes web/ from the website's build
+node_modules/
+web/
+src-tauri/target/
+src-tauri/gen/
+# signing keys never go in the repo
+*.key
+*.pfx
+*.p12

@@ -1,0 +1,160 @@
+# Builds Heartwood for Windows on GitHub's Windows machines.
+#  - A tag like v1.0.0 makes a release: the setup .exe and the .msi (under fixed names too, so the website's
+#    links never change), and latest.json, which installed copies read at launch to update themselves.
+#  - Run by hand (Actions > Release > Run workflow) it only builds, and keeps the installer as a download on
+#    the run's page: a way to try a build before tagging it.
+# Secrets it needs (Settings > Secrets and variables > Actions):
+#   GAME_REPO_TOKEN                     read access to the private heartwood and heartwood-deploy repos
+#   HW_CONFIG_JS                        the contents of heartwood-deploy/config.js
+#   TAURI_SIGNING_PRIVATE_KEY           the updater's private key (~/.tauri/heartwood.key on the Mac it was made on)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (~/.tauri/heartwood.key.password)
+# And later, for a code-signing certificate (none of this runs until they exist):
+#   WINDOWS_CERTIFICATE                 the .pfx file, base64
+#   WINDOWS_CERTIFICATE_PASSWORD        its password
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GAME_OWNER: boomcrop
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+    steps:
+      # the app, and beside it the game and the website build, as the folders sit on the Mac
+      - uses: actions/checkout@v7
+        with:
+          path: heartwood-windows
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.GAME_OWNER }}/heartwood
+          path: heartwood
+          token: ${{ secrets.GAME_REPO_TOKEN }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.GAME_OWNER }}/heartwood-deploy
+          path: heartwood-deploy
+          token: ${{ secrets.GAME_REPO_TOKEN }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Version
+        run: |
+          if [ "$RELEASE" = "true" ]; then V="${GITHUB_REF_NAME#v}"; else V=$(node -p "require('./heartwood-windows/package.json').version"); fi
+          node heartwood-windows/tools/set_version.js "$V"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: The website's build, as the app's game
+        env:
+          HW_CONFIG_JS: ${{ secrets.HW_CONFIG_JS }}
+        run: |
+          if [ -z "$HW_CONFIG_JS" ]; then echo "::error::The HW_CONFIG_JS secret is missing"; exit 1; fi
+          printf '%s\n' "$HW_CONFIG_JS" > heartwood-deploy/config.js
+          npm ci --prefix heartwood-deploy/tools --no-audit --no-fund
+          sh heartwood-windows/tools/sync_web.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: heartwood-windows/src-tauri -> target
+
+      - name: Tauri's command-line tool
+        run: npm ci --prefix heartwood-windows --no-audit --no-fund
+
+      # a code-signing certificate, once there is one: Tauri signs the app and both installers with it
+      - name: Code-signing certificate
+        if: env.HAS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          $conf = 'heartwood-windows/src-tauri/tauri.conf.json'
+          $j = Get-Content $conf -Raw | ConvertFrom-Json
+          $j.bundle.windows.certificateThumbprint = $cert.Thumbprint
+          $j.bundle.windows.timestampUrl = 'http://timestamp.digicert.com'
+          $j | ConvertTo-Json -Depth 20 | Set-Content $conf -Encoding utf8
+
+      - name: Build the app and the installers
+        working-directory: heartwood-windows
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is missing"; exit 1; fi
+          npx tauri build
+
+      - name: Collect the installers
+        run: |
+          B=heartwood-windows/src-tauri/target/release/bundle
+          mkdir -p out
+          cp "$B"/nsis/*-setup.exe "$B"/nsis/*-setup.exe.sig "$B"/msi/*.msi "$B"/msi/*.msi.sig out/
+          cp "$B"/nsis/*-setup.exe out/Heartwood-Setup.exe
+          cp "$B"/msi/*.msi out/Heartwood.msi
+          node heartwood-windows/tools/latest_json.js "$VERSION" "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" "$B" out/latest.json
+          sh heartwood-windows/tools/check_names.sh --binary out/*.exe out/*.msi
+          ls -l out
+
+      # the cheapest check that it really installs and runs: a silent install, then the game stays up for
+      # half a minute; a screenshot of it is kept with the run
+      - name: Install and start it
+        shell: pwsh
+        run: |
+          Start-Process -FilePath out\Heartwood-Setup.exe -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Heartwood') -Filter 'Heartwood.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'Heartwood.exe was not installed under %LOCALAPPDATA%\Heartwood' }
+          Write-Output "installed: $($exe.FullName)"
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 30
+          if ($p.HasExited) { throw "Heartwood quit by itself (exit code $($p.ExitCode))" }
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $s.Width, $s.Height
+            [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+            $bmp.Save((Join-Path $PWD 'out\running.png'))
+          } catch { Write-Output "no screenshot: $_" }
+          Stop-Process -Id $p.Id -Force
+          Write-Output 'Heartwood started and kept running'
+
+      - name: Keep the build with this run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heartwood-windows-${{ env.VERSION }}
+          path: out/
+          if-no-files-found: ignore
+
+      - name: Publish the release
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Heartwood $VERSION" --latest \
+            --notes "Heartwood $VERSION for Windows. Download **Heartwood-Setup.exe**. Windows may say \"Windows protected your PC\": click **More info**, then **Run anyway**." \
+            out/Heartwood-Setup.exe out/Heartwood.msi out/latest.json out/*_x64-setup.exe out/*_x64-setup.exe.sig out/*_x64_*.msi out/*_x64_*.msi.sig

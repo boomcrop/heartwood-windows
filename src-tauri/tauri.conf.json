@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Heartwood",
+  "mainBinaryName": "Heartwood",
+  "version": "1.0.0",
+  "identifier": "com.heartwoodgame.desktop",
+  "build": {
+    "frontendDist": "../web"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "msi"
+    ],
+    "publisher": "Heartwood",
+    "copyright": "Heartwood",
+    "category": "Game",
+    "shortDescription": "Grow a tree against sun, soil and storm",
+    "longDescription": "Heartwood: grow a pixel tree against sun, soil and storm, alone, against bots or with friends online.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      },
+      "wix": {
+        "language": "en-US"
+      },
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/boomcrop/heartwood-windows/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYxNTlBRjVFQTc3MkRBNDQKUldSRTJuS25YcTlaOFk0SWd3VGRxMVRTKzJyckQ3SFRiRDVqVU1iM3M2MjdyR0tCOE1tY1RGclQK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

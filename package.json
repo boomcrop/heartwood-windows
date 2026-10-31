@@ -1,0 +1,14 @@
+{
+  "name": "heartwood-windows",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Heartwood for Windows: the game in a desktop window, with installer and updates.",
+  "scripts": {
+    "sync": "sh tools/sync_web.sh",
+    "tauri": "tauri",
+    "build": "sh tools/sync_web.sh && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.3"
+  }
+}

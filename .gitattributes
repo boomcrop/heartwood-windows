@@ -1,0 +1,5 @@
+# plain line endings everywhere: the Windows build machines would otherwise turn them into CRLF and break the shell scripts
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
