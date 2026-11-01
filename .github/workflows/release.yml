@@ -5,9 +5,10 @@
 #    the run's page: a way to try a build before tagging it.
 # Secrets it needs (Settings > Secrets and variables > Actions):
 #   GAME_REPO_TOKEN                     read access to the private heartwood and heartwood-deploy repos
-#   HW_CONFIG_JS                        the contents of heartwood-deploy/config.js
 #   TAURI_SIGNING_PRIVATE_KEY           the updater's private key (~/.tauri/heartwood.key on the Mac it was made on)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (~/.tauri/heartwood.key.password)
+# The online services' settings (config.js) come from the live website, which serves them to every player
+# anyway; an HW_CONFIG_JS secret, if there is one, is used instead.
 # And later, for a code-signing certificate (none of this runs until they exist):
 #   WINDOWS_CERTIFICATE                 the .pfx file, base64
 #   WINDOWS_CERTIFICATE_PASSWORD        its password
@@ -68,8 +69,9 @@ jobs:
         env:
           HW_CONFIG_JS: ${{ secrets.HW_CONFIG_JS }}
         run: |
-          if [ -z "$HW_CONFIG_JS" ]; then echo "::error::The HW_CONFIG_JS secret is missing"; exit 1; fi
-          printf '%s\n' "$HW_CONFIG_JS" > heartwood-deploy/config.js
+          if [ -n "$HW_CONFIG_JS" ]; then printf '%s\n' "$HW_CONFIG_JS" > heartwood-deploy/config.js
+          else curl -fsSL --retry 3 https://heartwood-game.web.app/js/config.js -o heartwood-deploy/config.js; fi
+          grep -q '"apiKey"' heartwood-deploy/config.js || { echo "::error::config.js has no Firebase settings"; exit 1; }
           npm ci --prefix heartwood-deploy/tools --no-audit --no-fund
           sh heartwood-windows/tools/sync_web.sh
 
