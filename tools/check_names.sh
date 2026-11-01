@@ -3,9 +3,10 @@
 # list is kept in one place, ../heartwood-deploy/build.sh (NAMES=...). The Firebase libraries in web/lib are
 # left out, as there: they're Google's code.
 # check_names.sh PATH...   (an installer or other binary: check_names.sh --binary FILE...)
+# (the release build, without that folder, gets the same list in the TOOL_NAMES secret)
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-NAMES=$(sed -n "s/^NAMES='\(.*\)'\$/\1/p" "$HERE/../heartwood-deploy/build.sh")
-if [ -z "$NAMES" ]; then echo "stopped: no NAMES= line in ../heartwood-deploy/build.sh" >&2; exit 1; fi
+NAMES=${TOOL_NAMES:-$(sed -n "s/^NAMES='\(.*\)'\$/\1/p" "$HERE/../heartwood-deploy/build.sh" 2>/dev/null)}
+if [ -z "$NAMES" ]; then echo "stopped: no NAMES= line in ../heartwood-deploy/build.sh, and no TOOL_NAMES" >&2; exit 1; fi
 if [ "$1" = "--binary" ]; then
   shift
   # (only whole names in a binary: short words turn up in compressed data by chance)

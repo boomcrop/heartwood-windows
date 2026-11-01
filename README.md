@@ -16,6 +16,7 @@ copies read `latest.json` at launch and offer the update.
 
 ## Building
 
-The game's source and the website build live in two private repos next to this one (`heartwood`,
-`heartwood-deploy`). `tools/sync_web.sh` builds the website and copies it into `web/`; `npx tauri build`
-then makes the installers (on Windows).
+The release build takes the game from the live website (deploy it first): `tools/fetch_web.sh` downloads the
+files the site lists in `app-files.txt` into `web/`, so the app carries exactly what browser players get. On a
+Mac with the game's private repos beside this one, `tools/sync_web.sh` builds the website locally instead.
+`npx tauri build` then makes the installers (on Windows).

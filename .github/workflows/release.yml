@@ -3,12 +3,12 @@
 #    links never change), and latest.json, which installed copies read at launch to update themselves.
 #  - Run by hand (Actions > Release > Run workflow) it only builds, and keeps the installer as a download on
 #    the run's page: a way to try a build before tagging it.
+# The game comes from the live website (deploy it first): the files build.sh lists in app-files.txt there,
+# exactly what browser players get, its online services' settings included.
 # Secrets it needs (Settings > Secrets and variables > Actions):
-#   GAME_REPO_TOKEN                     read access to the private heartwood and heartwood-deploy repos
 #   TAURI_SIGNING_PRIVATE_KEY           the updater's private key (~/.tauri/heartwood.key on the Mac it was made on)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (~/.tauri/heartwood.key.password)
-# The online services' settings (config.js) come from the live website, which serves them to every player
-# anyway; an HW_CONFIG_JS secret, if there is one, is used instead.
+#   TOOL_NAMES                          the website's list of names no shipped file may contain (build.sh's NAMES=)
 # And later, for a code-signing certificate (none of this runs until they exist):
 #   WINDOWS_CERTIFICATE                 the .pfx file, base64
 #   WINDOWS_CERTIFICATE_PASSWORD        its password
@@ -26,9 +26,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  GAME_OWNER: boomcrop
-
 jobs:
   windows:
     runs-on: windows-latest
@@ -40,20 +37,10 @@ jobs:
       RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
       HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
-      # the app, and beside it the game and the website build, as the folders sit on the Mac
+      # (the app's folder by its name, as on the Mac)
       - uses: actions/checkout@v7
         with:
           path: heartwood-windows
-      - uses: actions/checkout@v7
-        with:
-          repository: ${{ env.GAME_OWNER }}/heartwood
-          path: heartwood
-          token: ${{ secrets.GAME_REPO_TOKEN }}
-      - uses: actions/checkout@v7
-        with:
-          repository: ${{ env.GAME_OWNER }}/heartwood-deploy
-          path: heartwood-deploy
-          token: ${{ secrets.GAME_REPO_TOKEN }}
 
       - uses: actions/setup-node@v7
         with:
@@ -65,15 +52,12 @@ jobs:
           node heartwood-windows/tools/set_version.js "$V"
           echo "VERSION=$V" >> "$GITHUB_ENV"
 
-      - name: The website's build, as the app's game
+      - name: The game, as the website serves it
         env:
-          HW_CONFIG_JS: ${{ secrets.HW_CONFIG_JS }}
+          TOOL_NAMES: ${{ secrets.TOOL_NAMES }}
         run: |
-          if [ -n "$HW_CONFIG_JS" ]; then printf '%s\n' "$HW_CONFIG_JS" > heartwood-deploy/config.js
-          else curl -fsSL --retry 3 https://heartwood-game.web.app/js/config.js -o heartwood-deploy/config.js; fi
-          grep -q '"apiKey"' heartwood-deploy/config.js || { echo "::error::config.js has no Firebase settings"; exit 1; }
-          npm ci --prefix heartwood-deploy/tools --no-audit --no-fund
-          sh heartwood-windows/tools/sync_web.sh
+          if [ -z "$TOOL_NAMES" ]; then echo "::error::The TOOL_NAMES secret is missing"; exit 1; fi
+          sh heartwood-windows/tools/fetch_web.sh
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -112,6 +96,8 @@ jobs:
           npx tauri build
 
       - name: Collect the installers
+        env:
+          TOOL_NAMES: ${{ secrets.TOOL_NAMES }}
         run: |
           B=heartwood-windows/src-tauri/target/release/bundle
           mkdir -p out
