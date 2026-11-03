@@ -1,7 +1,7 @@
-// Heartwood for Windows: the game in a desktop window, served from the files bundled with the app (so
-// single-player works offline), the same way the iPhone, iPad and Mac apps carry it. The page learns it
-// is in this app from window.HW_APP, which also says what this app can't do (no App Store, Game Center
-// or Sign in with Apple), and it signs in with Google through the browser (signin.rs).
+// Heartwood for Windows and Mac: the game in a desktop window, served from the files bundled with the app
+// (so single-player works offline), the same way the App Store apps carry it. The page learns it is in
+// this app from window.HW_APP, which also says what this app can't do (no App Store, Game Center or
+// Sign in with Apple), and it signs in with Google through the browser (signin.rs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod signin;
@@ -13,10 +13,14 @@ use tauri_plugin_opener::OpenerExt;
 /// the game's website: invite links to it open in the game, its other pages in the browser
 const SITE: &str = "heartwood-game.web.app";
 
+/// the system, as the game names it (DEVICE.os)
+const OS: &str = if cfg!(target_os = "macos") { "mac" } else { "windows" };
+
 /// what the page reads before its first line runs (native.js, core.js, platform.js); F11 goes full screen
+/// (on the Mac, View > Enter Full Screen in the menu bar does)
 fn app_script(version: &str) -> String {
     let info = serde_json::json!({
-        "os": "windows",
+        "os": OS,
         "device": "desktop",
         "version": version,
         "can": { "iap": false, "gc": false, "apple": false },
@@ -66,7 +70,7 @@ fn main() {
         .setup(|app| {
             let version = app.package_info().version.to_string();
             let handle = app.handle().clone();
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Heartwood")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(640.0, 360.0)
@@ -87,8 +91,12 @@ fn main() {
                         let _ = handle.opener().open_url(url.as_str(), None::<&str>);
                     }
                     false
-                })
-                .build()?;
+                });
+            // photos and videos: the Mac's web view drops downloads unless the app takes them, so they go
+            // to the Downloads folder, as the game says (Windows' web view does that by itself)
+            #[cfg(target_os = "macos")]
+            let window = window.on_download(|_, _| true);
+            window.build()?;
             updates::check_on_launch(app.handle().clone());
             Ok(())
         })
@@ -122,12 +130,13 @@ mod tests {
     }
 
     #[test]
-    fn the_page_learns_it_is_in_the_windows_app() {
+    fn the_page_learns_it_is_in_the_desktop_app() {
         let s = app_script("1.2.3");
         assert!(s.starts_with("window.HW_APP = {"));
         let json = &s["window.HW_APP = ".len()..s.find(";\n").unwrap()];
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(v["os"], "windows");
+        assert_eq!(v["os"], if cfg!(target_os = "macos") { "mac" } else { "windows" });
+        assert_eq!(v["device"], "desktop");
         assert_eq!(v["version"], "1.2.3");
         assert_eq!(v["signIn"], "browser");
         assert_eq!(v["can"]["iap"], false);

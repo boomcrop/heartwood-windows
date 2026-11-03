@@ -1,7 +1,8 @@
-# Builds Heartwood for Windows on GitHub's Windows machines.
-#  - A tag like v1.0.0 makes a release: the setup .exe and the .msi (under fixed names too, so the website's
-#    links never change), and latest.json, which installed copies read at launch to update themselves.
-#  - Run by hand (Actions > Release > Run workflow) it only builds, and keeps the installer as a download on
+# Builds Heartwood for Windows and Mac on GitHub's machines.
+#  - A tag like v1.1.0 makes a release: the Windows setup .exe and .msi, the Mac disk image (under fixed names
+#    too, so the website's links never change), and latest.json, which installed copies read at launch to
+#    update themselves. Each build is installed and started first; if either fails, nothing is published.
+#  - Run by hand (Actions > Release > Run workflow) it only builds, and keeps the installers as downloads on
 #    the run's page: a way to try a build before tagging it.
 # The game comes from the live website (deploy it first): the files build.sh lists in app-files.txt there,
 # exactly what browser players get, its online services' settings included.
@@ -9,9 +10,14 @@
 #   TAURI_SIGNING_PRIVATE_KEY           the updater's private key (~/.tauri/heartwood.key on the Mac it was made on)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (~/.tauri/heartwood.key.password)
 #   TOOL_NAMES                          the website's list of names no shipped file may contain (build.sh's NAMES=)
-# And later, for a code-signing certificate (none of this runs until they exist):
-#   WINDOWS_CERTIFICATE                 the .pfx file, base64
+# And later, for code signing (none of this runs until they exist):
+#   WINDOWS_CERTIFICATE                 a Windows code-signing .pfx file, base64
 #   WINDOWS_CERTIFICATE_PASSWORD        its password
+#   APPLE_CERTIFICATE                   a "Developer ID Application" certificate exported as .p12, base64
+#   APPLE_CERTIFICATE_PASSWORD          its password
+#   APPLE_SIGNING_IDENTITY              its name, e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   the Apple account, an app-specific password and the team ID, to
+#                                       have Apple notarize the Mac app (then macOS opens it without a warning)
 name: Release
 
 on:
@@ -104,7 +110,6 @@ jobs:
           cp "$B"/nsis/*-setup.exe "$B"/nsis/*-setup.exe.sig "$B"/msi/*.msi "$B"/msi/*.msi.sig out/
           cp "$B"/nsis/*-setup.exe out/Heartwood-Setup.exe
           cp "$B"/msi/*.msi out/Heartwood.msi
-          node heartwood-windows/tools/latest_json.js "$VERSION" "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" "$B" out/latest.json
           sh heartwood-windows/tools/check_names.sh --binary out/*.exe out/*.msi
           ls -l out
 
@@ -125,7 +130,7 @@ jobs:
             $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
             $bmp = New-Object System.Drawing.Bitmap $s.Width, $s.Height
             [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
-            $bmp.Save((Join-Path $PWD 'out\running.png'))
+            $bmp.Save((Join-Path $PWD 'out\running-windows.png'))
           } catch { Write-Output "no screenshot: $_" }
           Stop-Process -Id $p.Id -Force
           Write-Output 'Heartwood started and kept running'
@@ -138,11 +143,150 @@ jobs:
           path: out/
           if-no-files-found: ignore
 
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: heartwood-windows
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Version
+        run: |
+          if [ "$RELEASE" = "true" ]; then V="${GITHUB_REF_NAME#v}"; else V=$(node -p "require('./heartwood-windows/package.json').version"); fi
+          node heartwood-windows/tools/set_version.js "$V"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: The game, as the website serves it
+        env:
+          TOOL_NAMES: ${{ secrets.TOOL_NAMES }}
+        run: |
+          if [ -z "$TOOL_NAMES" ]; then echo "::error::The TOOL_NAMES secret is missing"; exit 1; fi
+          sh heartwood-windows/tools/fetch_web.sh
+
+      # one app for every Mac: Apple silicon and Intel in the same file
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: heartwood-windows/src-tauri -> target
+
+      - name: Tauri's command-line tool
+        run: npm ci --prefix heartwood-windows --no-audit --no-fund
+
+      # Without a Developer ID certificate the app is signed by itself ("-" in tauri.macos.conf.json): macOS
+      # then asks players to allow it once in System Settings. With one (and the Apple account to notarize),
+      # Tauri signs it and has Apple notarize it, and it opens like any app.
+      - name: Build the app and the disk image
+        working-directory: heartwood-windows
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is missing"; exit 1; fi
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            node -e "const f='src-tauri/tauri.macos.conf.json',fs=require('fs'),j=JSON.parse(fs.readFileSync(f));j.bundle.macOS.signingIdentity=process.env.APPLE_SIGNING_IDENTITY;fs.writeFileSync(f,JSON.stringify(j,null,2))"
+            echo "signing with the Developer ID certificate"
+            if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; echo "::warning::no Apple account secrets: signed but not notarized"; fi
+          else
+            unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          npx tauri build --target universal-apple-darwin
+
+      - name: Collect the disk image
+        env:
+          TOOL_NAMES: ${{ secrets.TOOL_NAMES }}
+        run: |
+          B=heartwood-windows/src-tauri/target/universal-apple-darwin/release/bundle
+          mkdir -p out
+          cp "$B"/dmg/*.dmg out/
+          cp "$B"/dmg/*.dmg out/Heartwood.dmg
+          cp "$B/macos/Heartwood.app.tar.gz" "out/Heartwood_${VERSION}_universal.app.tar.gz"
+          cp "$B/macos/Heartwood.app.tar.gz.sig" "out/Heartwood_${VERSION}_universal.app.tar.gz.sig"
+          sh heartwood-windows/tools/check_names.sh --binary "$B/macos/Heartwood.app/Contents/MacOS/Heartwood" out/*.dmg
+          ls -l out
+
+      # the same check as on Windows, from the disk image players download: open it, copy the app out the way
+      # a player drags it to Applications, then the game stays up for half a minute; a screenshot is kept
+      - name: Install and start it
+        run: |
+          MNT="$RUNNER_TEMP/heartwood-dmg"
+          hdiutil attach out/Heartwood.dmg -nobrowse -readonly -mountpoint "$MNT"
+          ls -la "$MNT"
+          [ -L "$MNT/Applications" ] || { echo "::error::the disk image has no Applications shortcut"; exit 1; }
+          mkdir -p "$HOME/Applications"
+          ditto "$MNT/Heartwood.app" "$HOME/Applications/Heartwood.app"
+          hdiutil detach "$MNT"
+          APP="$HOME/Applications/Heartwood.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ARCHS=$(lipo -archs "$APP/Contents/MacOS/Heartwood"); echo "architectures: $ARCHS"
+          case "$ARCHS" in *arm64*x86_64* | *x86_64*arm64*) ;; *) echo "::error::not a universal app: $ARCHS"; exit 1 ;; esac
+          plutil -p "$APP/Contents/Info.plist" | grep -E 'CFBundleIdentifier|CFBundleShortVersionString|LSMinimumSystemVersion'
+          "$APP/Contents/MacOS/Heartwood" &
+          PID=$!
+          sleep 30
+          STATE=$(ps -o stat= -p "$PID" 2>/dev/null || true)
+          case "$STATE" in '' | Z*) echo "::error::Heartwood quit by itself"; exit 1 ;; esac
+          screencapture -x out/running-mac.png || echo "no screenshot"
+          kill "$PID"
+          echo "Heartwood started and kept running"
+
+      - name: Keep the build with this run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heartwood-mac-${{ env.VERSION }}
+          path: out/
+          if-no-files-found: ignore
+
+  # only once both builds have installed and started
+  publish:
+    needs: [windows, mac]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: heartwood-windows
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish the release
-        if: env.RELEASE == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node heartwood-windows/tools/latest_json.js "$VERSION" "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" dist dist/latest.json
+          ls -l dist
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Heartwood $VERSION" --latest \
-            --notes "Heartwood $VERSION for Windows. Download **Heartwood-Setup.exe**. Windows may say \"Windows protected your PC\": click **More info**, then **Run anyway**." \
-            out/Heartwood-Setup.exe out/Heartwood.msi out/latest.json out/*_x64-setup.exe out/*_x64-setup.exe.sig out/*_x64_*.msi out/*_x64_*.msi.sig
+            --notes "Heartwood $VERSION for Windows and Mac.
+
+          **Windows:** download **Heartwood-Setup.exe**. If Windows says \"Windows protected your PC\", click **More info**, then **Run anyway**.
+
+          **Mac:** download **Heartwood.dmg**, open it and drag Heartwood to Applications. If macOS says it can't verify Heartwood, click **Done**, open **System Settings > Privacy & Security**, scroll down and click **Open Anyway**." \
+            dist/Heartwood-Setup.exe dist/Heartwood.msi dist/Heartwood.dmg dist/latest.json \
+            dist/*_x64-setup.exe dist/*_x64-setup.exe.sig dist/*_x64_*.msi dist/*_x64_*.msi.sig \
+            dist/*_universal.dmg dist/*_universal.app.tar.gz dist/*_universal.app.tar.gz.sig
